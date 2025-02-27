@@ -1,0 +1,1491 @@
+---
+title: "Crash course - Decoding Road accidents in the USA"
+author: "Vedenikova Vitalia / Perez Olusese"
+date: "2024-06-06"
+output:
+  html_document:
+    theme: journal
+    toc: true
+    toc_float: true
+editor_options:
+  chunk_output_type: inline
+---
+
+<style>
+body {
+  font-size: 16px;
+}
+</style>
+
+```{r setup, include=FALSE}
+
+# Load Libraries
+require(dplyr)
+require(tidyr)
+require(tinytex)
+library(lubridate)
+library(ggplot2)
+library(ggcorrplot)
+library(gt)
+library(reshape2)
+library(knitr)
+library(kableExtra)
+library(tidyverse)
+library(summarytools)
+library(tseries)
+library(forecast)
+library(broom)
+library(leaflet)
+library(sf)
+library(maps)
+library(cowplot)
+library(sjPlot)
+library(hms)
+library(readxl)
+library(RColorBrewer)
+library(mgcv)
+library(ellipse)
+library(conflicted)
+library(caret)
+library(neuralnet)
+library(parallel)
+library(doParallel)
+library(foreach)
+library(data.table)
+library(caret)
+library(e1071)
+library(pryr)
+
+# Set the working directory
+setwd("C:/Users/...")
+
+```
+
+
+## Preface
+
+As a foreword, please be aware that this work was made by a team of two people : Perez Olusese and Vitalia Vedenikova. Our team member Luis Marani quit the Master's in Applied Information and Data Science and has therefore not worked with us on this project. 
+
+The context of this report is as follows: we are a team of data scientists mandated by the US Department of Transportation in 2023 to investigate car accidents in the USA for the year 2022.
+
+## Introduction
+
+In this report, we conduct a detailed statistical analysis of car accidents in the USA for the year 2022, focusing on the duration, frequency, and severity of accidents. By examining various variables, we aim to identify key predictors for the time it takes to resolve an accident, the occurrence of accidents, and their severity. Our findings reveal significant trends and correlations that can inform more effective road safety regulations and interventions. This analysis provides crucial insights that could help reduce the economic costs borne by taxpayers and enhance overall road safety.
+
+We look forward to answering the following questions in our analysis.
+
+- What variables are associated with longer times to resolve a car accident? 
+
+- What variables are associated with the occurrence an accident?
+
+- What variables are the strongest predictors for the severity of an accident? Can it be accurately predicted?  
+
+## Description of the data used
+
+Two primary datasets serve as the cornerstone for our analysis. The first data can be found on Kaggle through this link sethttps://www.kaggle.com/datasets/sobhanmoosavi/us-accidents. The author provided a sampled data set for easier handling which we will be using here. 
+
+Despite this, the data set still had a large size (N = 5*10^5) and 55 predictors. Its data spans from 2016 to 2023 and was collected through the use of real-time data providers who source their information from the US and state departments of transportation as well as various other agencies and sensors. There are multiple continuous variables (temperature, precipitation level, visible distance, etc.) as well as categorical variables with more than two levels (weather conditions, timezone, etc.) which we made sure to keep for this analysis.
+
+Our second dataset is from US Census Bureau with estimated populations per city. (source: https://www.census.gov/data/tables/time-series/demo/popest/2020s-total-cities-and-towns.html): We included this data set because we would like to examine the population predictor in our models as well.
+
+This paper does not contain the data transformation process as it is not the subject of our work.  
+
+It involved the following steps:
+1. As a first step, we briefly examined the data set and filtered for the year 2022. 
+2. We removed unnecessary variables that were also full of NA values
+3. We had to transform all units in the Imperial system of measurement to the metric system and rename some columns
+4. We used stratified random sampling per US county to only keep 84% of the data and bring it below the size of N = 10^5 
+5. We categorized the streets into street types to be able to use them for our models
+6. We calculated the duration of each accident, categorized the times of accidents into time intervals (morning, afternoon, etc.) and kept only the months of occurrence from the dates. 
+7. We dropped all irrelevant variables
+8. We augmented our data frame with cities' populations to take it into account during analysis
+9. We handled missing data by replacing them by specifically defined means
+10. We added the count of accidents per US state to be used in some models.
+
+Full data preparation code can be read by pressing the button:
+<details><summary>Click here to see details</summary>
+
+```{r Data_Preparation,echo=TRUE, message=FALSE, warning= FALSE}
+conflicts_prefer(lubridate::hour)
+conflicts_prefer(lubridate::ymd)
+
+############ 1. Load and read the data set. Only keep the data for the year 2022 ############
+
+# Load and read the data
+accident_raw <- read_csv("US_Accidents_March23_sampled_500k.csv")
+str (accident_raw)
+
+
+# create new variable year
+accident_raw$year <-  (str_sub(accident_raw$Start_Time, 1, 4))
+
+# filter only accidents in the year 2022
+accident_2022 <- accident_raw %>% dplyr::filter(year == 2022)
+
+
+############ 2. Removing Unnecessary variables ############
+
+#lowercase names
+names(accident_2022) <- tolower(names(accident_2022)) 
+
+# Looking for variables which are NAs
+colSums(is.na(accident_2022))
+max(colSums(is.na(accident_2022))) 
+
+accident_2022$precipitation.in. %in% c(NA, "NA")
+sum(accident_2022$temperature.f. %in% c(NA, "NA"))
+
+# end_lat, end_lng indicate the position where the accident ended. We consider them not relevant for our analysis and they have the max amount of missing values at 15384 each = these variables are eliminated
+# until the variable weather_timestamp all values are available, from weather down seems to have some missing values 
+
+accident_2022_clean_01 <- subset(accident_2022, select = -c(end_lat, end_lng))
+# new tibble [113,734 × 46]
+
+############ 3. Fixing variable names and converting units to the metric system ############
+
+#Fixing names
+names(accident_2022_clean_01)
+
+accident_2022_clean_02 <- rename(accident_2022_clean_01,c(
+  "lat_deg" = "start_lat",
+  "lng_deg" = "start_lng", 
+  "dist_mi"="distance(mi)",
+  "descript" = "description",
+  "temp_f"  = "temperature(f)",
+  "wind_chill_f" = "wind_chill(f)",
+  "humid" = "humidity(%)",
+  "press_in" = "pressure(in)",
+  "visib_mi" = "visibility(mi)",
+  "wind_speed_mph" = "wind_speed(mph)",
+  "presip_in" = "precipitation(in)",
+  "weather_cond" = "weather_condition",
+  "nautic_twilight" = "nautical_twilight",   
+  "astron_twilight" = "astronomical_twilight"))
+
+
+#Converting to the metric system
+accident_2022_clean_03 <- accident_2022_clean_02 %>%
+                          mutate(dist_km = dist_mi * 1.6093,
+                                temp_c = (temp_f - 32) * 5 / 9,
+                                wind_chill_c = (wind_chill_f - 32) * 5 / 9,
+                                press_hpa = press_in * 1.33322,
+                                visib_km = visib_mi * 1.6093,
+                                wind_speed_kph = wind_speed_mph * 1.6093,
+                                presip_mm = presip_in * 25.4)
+
+
+#now removing the variables which are not in metric units and we drop all the 'twilight' variables since we already have the 'sunrise_sunset' variable telling us if it is day time or night time:
+accident_2022_clean_03 <- accident_2022_clean_03 %>% 
+  select(-ends_with('_mi')) %>%    # drop any column with a name that ends with '_mi' for 'miles'
+  select(-ends_with('_f')) %>%     # drop any column with a name that ends with '_f' for 'farenheit'
+  select(-ends_with('_in')) %>%    # drop any column with a name that ends with '_in' for 'inches'
+  select(-ends_with('_mph')) %>%    # drop any column with a name that ends with '_mph' for 'miles per hour'
+  select(-(civil_twilight:astron_twilight)) # drop 'twilight' variables
+
+
+############ 4. Reducing the size of the data frame with stratified sampling ############
+
+# In order to keep the amount of data points below 10^5, we decided to reduce the amount of entries. The data set had 3 sources which were pulling information from the same places (US and state departments of transportation), we decided to randomly sample each county.
+
+unique(accident_2022_clean_03$source)
+
+accident_2022_clean_04 <- accident_2022_clean_03%>%
+  group_by(county) %>%
+  sample_frac(size=.84) %>%
+  ungroup()
+
+
+accident_2022_clean_03 %>% 
+  group_by(state,county) %>%
+  do(data.frame(nrow=nrow(.)))
+
+accident_2022_clean_04 %>% 
+  group_by(state,county) %>%
+  do(data.frame(nrow=nrow(.)))
+
+
+############ 5. Creating a categorical variable for the streets ############
+
+#We categorize the streets and make 'street' a categorical variable on this basis:
+
+accident_2022_clean_05 <- accident_2022_clean_04 %>%
+  mutate(street = case_when(
+    grepl("\\bFwy\\b|\\bFWY\\b", street, ignore.case = TRUE) ~ "Freeway",
+    grepl("\\bRd\\b|\\bRD\\b|\\bRoad\\b|\\bFL\\b|\\bFM\\b|\\bPl\\b|\\bPike\\b|\\bBdg\\b", street, ignore.case = TRUE) ~ "Road",
+    grepl("\\bAve\\b|\\bAv\\b", street, ignore.case = TRUE) ~ "Avenue",
+    grepl("\\bDr\\b|\\bdr\\b", street, ignore.case = TRUE) ~ "Drive",
+    grepl("\\bPkwy\\b", street, ignore.case = TRUE) ~ "Parkway",
+    grepl("\\bHwy\\b|\\bwy\\b", street, ignore.case = TRUE) ~ "Highway",
+    grepl("\\bBlvd\\b|\\bblvd\\b", street, ignore.case = TRUE) ~ "Boulevard",
+    grepl("\\bst\\b|\\bST\\b", street, ignore.case = TRUE) ~ "Street",
+    grepl("\\bLn\\b|\\bln\\b", street, ignore.case = TRUE) ~ "Lane",
+    grepl("\\bBrg\\b|\\bbrg\\b", street, ignore.case = TRUE) ~ "Bridge",
+    grepl("\\bTpke\\b", street, ignore.case = TRUE) ~ "Turnpike",
+    grepl("\\bRoute\\b|\\bEl\\ Camino\\b|\\bI-10\\b|\\bUS\\ 66\\b|\\bIL\\b|\\bIN\\b|\\bIA\\b|\\bUS\\b|\\bUT\\b", street, ignore.case = TRUE) ~ "Route",
+    grepl("\\bTunl\\b|\\bTunnel\\b", street, ignore.case = TRUE) ~ "Tunnel",
+    grepl("\\bTlwy\\b|\\bToll\\b", street, ignore.case = TRUE) ~ "Tollway",
+    grepl("\\bWI\\b|\\bTX\\b", street, ignore.case = TRUE) ~ "State Highway",
+    grepl("\\bBltwy\\b", street, ignore.case = TRUE) ~ "Beltway",
+    grepl("\\bVA\\b|\\bW2100\\b|\\bW3300\\b|\\bExpy\\b", street, ignore.case = TRUE) ~ "Expressway",
+    TRUE ~ "Others" # For any unmatched cases
+  ))
+
+
+############ 6. Handling the time variables ############
+
+# We will add columns Hour and Month of the accident as well as time duration of the accident to our data set and remove "start_time" and "end_time" of the accidents:
+
+accident_2022_clean_05$start_time<- ymd_hms(accident_2022_clean_05$start_time)
+accident_2022_clean_05$end_time <- ymd_hms(accident_2022_clean_05$end_time)
+
+accident_2022_clean_05 <- accident_2022_clean_05 %>% 
+  mutate(duration = as.numeric(difftime(end_time, start_time, units = "mins")))
+
+accident_2022_clean_05$hour_accident <- as_hms(ymd_hms(accident_2022_clean_05$start_time))
+accident_2022_clean_05$hour_accident <- hour(accident_2022_clean_05$hour_accident)
+
+accident_2022_clean_05$date <- as.Date(accident_2022_clean_05$start_time)
+accident_2022_clean_05$month <- lubridate::month(ymd(accident_2022_clean_05$date))
+
+accident_2022_clean_05 <- accident_2022_clean_05 %>% 
+  select (-c(start_time))%>% 
+  select (-c(end_time)) %>% 
+  select (-c(date))
+
+# We replace time with a categorical variable with levels by intervals of 6 hours: early morning (0h-6h), morning (6h-12h), afternoon (12h-18h), night(18h-0h). 
+
+accident_2022_clean_05$time_interval <- case_when(
+  accident_2022_clean_05$hour_accident >= 0 & accident_2022_clean_05$hour_accident < 6 ~ "Early morning",
+  accident_2022_clean_05$hour_accident >= 6 & accident_2022_clean_05$hour_accident < 12 ~ "Morning",
+  accident_2022_clean_05$hour_accident >= 12 & accident_2022_clean_05$hour_accident < 18 ~ "Afternoon",
+  TRUE ~ "Night"
+)
+
+accident_2022_clean_06 <- accident_2022_clean_05 %>% 
+  select (-c(hour_accident))
+
+
+
+############ 7. Removing unnecessary variables ############
+
+# We remove year, id, country, airport code, source of data, distance on which the accident took place, description of accidents, weather timestamp, lat_deg, ln_deg, zipcode. They are not relevant explanatory variables considering the focus of our work. 
+
+drop.col <- c("id", "source", "country", "airport_code","year", "descript", "weather_timestamp", "dist_km", "lat_deg", "lng_deg", "zipcode", "timezone")
+accident_2022_clean_06 <- accident_2022_clean_06 %>% 
+  select (-one_of(drop.col))
+
+#Here below, by looking at all the weather variables in a scatter plot, we can clearly see that there is a strong correlation between temperature and wind chill. Wind chill should be removed 
+#(note : we commented out the code since it takes some time to run). 
+
+#pairs( temp_c ~ wind_chill_c + presip_mm + humid + visib_km + wind_speed_kph + month, data = accident_2022_clean_06, upper.panel = panel.smooth)
+
+# Some variables are removed in order to simplify our data set and future models. Since we already have the weather condition and the temperature, we decide to remove humidity, wind direction, press_hpa, wind_speed_kph as well as wind chill. 
+
+drop.col2 <- c("humid", "wind_direction", "press_hpa", "wind_chill_c", "wind_speed_kph")
+accident_2022_clean_06 <- accident_2022_clean_06 %>% 
+  select (-one_of(drop.col2)) 
+
+#The below boxplot also shows us that the visibility on the road is concentrated around the value of 16km, which is very good visibility. Also, visibility remains constant across the severity of the accidents as can be seen in the ggplot. We deduce that visibility is not correlated to car accidents and remove it from our data set. 
+
+boxplot(accident_2022_clean_06$visib_km, main="Visibility in Km")
+
+ggplot(data = accident_2022_clean_06, mapping = aes(y = visib_km, x = severity)) + geom_point() + geom_boxplot() + facet_wrap(.~ severity)
+
+accident_2022_clean_06 <- accident_2022_clean_06 %>% 
+  select (-visib_km) 
+
+# We notice by looking at the boolean variables we have in our data set that there are quite a few that are 99%-100% false, therefore making them not interesting to model across states or road types. We decide to remove them for this reason.  
+summary(accident_2022_clean_06$traffic_calming) # ~0.1% are TRUE
+summary(accident_2022_clean_06$roundabout)      # ~0% are TRUE 
+summary(accident_2022_clean_06$railway)         # ~0.1% are TRUE
+summary(accident_2022_clean_06$turning_loop)    #  0% are TRUE 
+summary(accident_2022_clean_06$give_way)        # ~0% are TRUE 
+summary(accident_2022_clean_06$bump)            # ~0% are TRUE
+summary(accident_2022_clean_06$no_exit)         # ~0% are TRUE
+
+drop.col3 <- c("traffic_calming", "roundabout", "railway", "turning_loop", "give_way", "bump", "no_exit")
+
+accident_2022_clean_07 <- accident_2022_clean_06 %>% 
+  select (-one_of(drop.col3)) 
+
+############ 8. Adding the population to our data set  ############
+
+#We also consider at what level of granularity we want to examine our data. We can go down to individual streets in each US city, however we would instead prefer to consider ranges of populations per city. States are too large and counties largely vary in size depending on if we are on the West or East coast of the USA. For this reason, we would like to focus on cities and remove the "county" variable. Ultimately, we should also categorize cities' populations and examine the population predictor in our models as well.
+
+## We import the populations data set from the US Census Bureau with estimated populations per city and reformat the table (source: https://www.census.gov/data/tables/time-series/demo/popest/2020s-total-cities-and-towns.html):
+
+d.population <- read_excel("SUB-IP-EST2022-POP.xlsx")
+names(d.population) <- d.population[2,]
+d.population <- d.population[-(1:2),]
+names(d.population)[4] <- "2021"
+names(d.population)[5] <- "2022"
+d.population <- d.population[-c(2:4)]
+d.population <- d.population[-1,]
+d.population[c('city', 'state')] <- str_split_fixed(d.population$`Geographic Area`, ',', 2)
+d.population <- d.population[c('state', 'city', '2022')]
+
+d.population <- d.population %>%
+  mutate(state = str_replace(state,'Alabama', 'AL'))%>%
+  mutate(state = str_replace(state,'Alaska', 'AK'))%>%
+  mutate(state = str_replace(state,'Arkansas', 'AR'))%>%
+  mutate(state = str_replace(state,'Arizona', 'AZ'))%>%
+  mutate(state = str_replace(state,'California', 'CA'))%>%
+  mutate(state = str_replace(state,'Colorado', 'CO'))%>%
+  mutate(state = str_replace(state,'Connecticut', 'CT'))%>%
+  mutate(state = str_replace(state,'Delaware', 'DE'))%>%
+  mutate(state = str_replace(state,'District of Columbia', 'DC'))%>%
+  mutate(state = str_replace(state,'Florida', 'FL'))%>%
+  mutate(state = str_replace(state,'Georgia', 'GA'))%>%
+  mutate(state = str_replace(state,'Hawaii', 'HI'))%>%
+  mutate(state = str_replace(state,'Idaho', 'ID'))%>%
+  mutate(state = str_replace(state,'Illinois', 'IL'))%>%
+  mutate(state = str_replace(state,'Indiana', 'IN'))%>%
+  mutate(state = str_replace(state,'Iowa', 'IA'))%>%
+  mutate(state = str_replace(state,'Kansas', 'KS'))%>%
+  mutate(state = str_replace(state,'Kentucky', 'KY'))%>%
+  mutate(state = str_replace(state,'Louisiana', 'LA'))%>%
+  mutate(state = str_replace(state,'Maine', 'ME'))%>%
+  mutate(state = str_replace(state,'Maryland', 'MD'))%>%
+  mutate(state = str_replace(state,'Massachusetts', 'MA'))%>%
+  mutate(state = str_replace(state,'Michigan', 'MI'))%>%
+  mutate(state = str_replace(state,'Minnesota', 'MN'))%>%
+  mutate(state = str_replace(state,'Mississippi', 'MS'))%>%
+  mutate(state = str_replace(state,'Missouri', 'MO'))%>%
+  mutate(state = str_replace(state,'Montana', 'MT'))%>%
+  mutate(state = str_replace(state,'Nebraska', 'NE'))%>%
+  mutate(state = str_replace(state,'Nevada', 'NV'))%>%
+  mutate(state = str_replace(state,'New Hampshire', 'NH'))%>%
+  mutate(state = str_replace(state,'New Jersey', 'NJ'))%>%
+  mutate(state = str_replace(state,'New Mexico', 'NM'))%>%
+  mutate(state = str_replace(state,'New York', 'NY'))%>%
+  mutate(state = str_replace(state,'North Carolina', 'NC'))%>%
+  mutate(state = str_replace(state,'North Dakota', 'ND'))%>%
+  mutate(state = str_replace(state,'Ohio', 'OH'))%>%
+  mutate(state = str_replace(state,'Oklahoma', 'OK'))%>%
+  mutate(state = str_replace(state,'Oregon', 'OR'))%>%
+  mutate(state = str_replace(state,'Pennsylvania', 'PA'))%>%
+  mutate(state = str_replace(state,'Rhode Island', 'RI'))%>%
+  mutate(state = str_replace(state,'South Carolina', 'SC'))%>%
+  mutate(state = str_replace(state,'South Dakota', 'SD'))%>%
+  mutate(state = str_replace(state,'Tennessee', 'TN'))%>%
+  mutate(state = str_replace(state,'Texas', 'TX'))%>%
+  mutate(state = str_replace(state,'Utah', 'UT'))%>%
+  mutate(state = str_replace(state,'Vermont', 'VT'))%>%
+  mutate(state = str_replace(state,'Virginia', 'VA'))%>%
+  mutate(state = str_replace(state,'Washington', 'WA'))%>%
+  mutate(state = str_replace(state,'West VA', 'WV'))%>%
+  mutate(state = str_replace(state,'Wisconsin', 'WI'))%>%
+  mutate(state = str_replace(state,'Wyoming', 'WY'))
+
+##rename the 3rd column to population
+colnames(d.population)[3] = 'cities_population'
+
+##to insure a proper merge we keep only the city names in the population data frame:
+d.population <- d.population %>%
+  mutate(city = str_replace(city,'city', ''))%>%
+  mutate(city = str_replace(city,'town', ''))
+
+##change the type of the 3rd column to character so the data types of key columns match for the merge
+d.population <- d.population %>%
+  mutate(cities_population = trimws(as.character(cities_population)))
+d.population <- as.data.frame(d.population)
+accident_2022_clean_08 <- as.data.frame(accident_2022_clean_07 )
+
+##remove unnecessary rows
+d.population <- d.population[-(19494:19498),]
+
+##Make sure that there are no white spaces in the columns we will use as keys for the merge
+d.population <- d.population%>%
+  mutate(cities_population = trimws(cities_population))%>%
+  mutate(city= trimws(city))%>%
+  mutate(state= trimws(state))
+
+accident_2022_clean_08  <- accident_2022_clean_08 %>%
+  mutate(city= trimws(city))%>%
+  mutate(state= trimws(state))
+
+## We augment our accidents data set with the population information by making a left join:
+accident_2022_clean_08 <- left_join(accident_2022_clean_08 , d.population, by = c("state","city"))
+head(accident_2022_clean_08)
+
+############ 9. Handle missing values ############
+
+#first, we make sure that there is NA in every empty row: 
+accident_2022_clean_09 <- accident_2022_clean_08 
+accident_2022_clean_09[accident_2022_clean_09 == ''] <- NA
+
+#We inspect which variables have missing values and see that there are missing values in : cities_population, presip_mm, temp_c, weather_cond, sunrise_sunset, city
+colSums(is.na(accident_2022_clean_09))
+
+#city: we take the most prevalent city for the relevant county and insert it in the empty rows. We also insert the relevant city's population. 
+
+occurences_per_city <- accident_2022_clean_09 %>%
+  group_by(county, city)%>%
+  summarize(n=n())%>%
+  ungroup()
+
+most_prevalent_city <- occurences_per_city %>%
+  group_by(county)%>%
+  slice(which.max(n))%>%
+  ungroup()
+
+colnames(most_prevalent_city)[2] = 'prevalent_city'
+
+accident_2022_clean_09 <- left_join(accident_2022_clean_09 , most_prevalent_city, by = "county")
+
+for (x in 1:nrow(accident_2022_clean_09)){
+  if (is.na(accident_2022_clean_09$city[x])){
+    accident_2022_clean_09$city[x] <- accident_2022_clean_09$prevalent_city[x]
+    accident_2022_clean_09$cities_population[x]<-accident_2022_clean_09$cities_population[accident_2022_clean_09$city==accident_2022_clean_09$city[x]]
+  }
+}
+
+accident_2022_clean_09 <- accident_2022_clean_09 %>% 
+  select (-prevalent_city)%>%
+  select (-n) 
+
+#cities_population: 25% of cities' populations were not in the census survey. We remedy this by taking the mean of each county's cities' population and replacing it into the rows with NA for population. 
+
+accident_2022_clean_09$cities_population <- as.numeric(accident_2022_clean_09$cities_population)
+
+accident_2022_clean_09 <- accident_2022_clean_09 %>%
+  group_by(state, county) %>%
+  mutate(cities_population = ifelse(is.na(cities_population), mean(cities_population, na.rm = TRUE),cities_population)) %>%
+  ungroup()
+
+#We take the population average on the county level otherwise for the 5520 still missing values
+accident_2022_clean_09 <- accident_2022_clean_09 %>%
+  group_by(state) %>%
+  mutate(cities_population = ifelse(is.na(cities_population), mean(cities_population, na.rm = TRUE),cities_population)) %>%
+  ungroup()
+
+
+#We also see a lot of missing values for the temperature. We replace it with the mean temperature for the county in the relevant month when the accident took place. 
+
+accident_2022_clean_09 <- accident_2022_clean_09 %>%
+  group_by(state, county, month) %>%
+  mutate(temp_c = ifelse(is.na(temp_c), mean(temp_c, na.rm = TRUE), temp_c)) %>%
+  ungroup()
+
+#if there are still temperatures missing, then we take the mean temperature at state level: 
+
+accident_2022_clean_09 <- accident_2022_clean_09 %>%
+  group_by(state, month) %>%
+  mutate(temp_c = ifelse(is.na(temp_c), mean(temp_c, na.rm = TRUE), temp_c)) %>%
+  ungroup()
+
+#for this last missing temperature, we take the mean of the state
+mean_temp_ME <- accident_2022_clean_09 %>%
+  dplyr::filter(state == "ME") %>%
+  summarize(mean_temperature = mean(temp_c, na.rm = TRUE))
+
+accident_2022_clean_09$temp_c[84007] <- mean_temp_ME
+
+#precipitation (mm): Most of the values are around 0, no matter the severity of the accident as shown by the bar graph and the boxplots below. We simply replace the NA with 0 and since it has a lot of outliers higher than 0, we keep it for now.
+ggplot(accident_2022_clean_09, aes(x = presip_mm)) +
+  geom_bar()
+
+ggplot(accident_2022_clean_09, aes(x=severity, y=log(presip_mm), fill=severity)) + 
+    geom_boxplot() +
+    facet_wrap(~severity)
+
+accident_2022_clean_09["presip_mm"][is.na(accident_2022_clean_09["presip_mm"])]<-0
+
+#sunrise_sunset: we define sunrise or sunset based on the time interval
+
+day_or_night <- function(time_interval) {
+  if (time_interval == "Morning"|time_interval == "Afternoon") {
+    return("Day")
+  } else {
+    return("Night")
+  }
+}
+
+accident_2022_clean_09$sunrise_sunset <- ifelse(is.na(accident_2022_clean_09$sunrise_sunset), sapply(accident_2022_clean_09$time_interval, day_or_night), accident_2022_clean_09$sunrise_sunset)
+
+
+#weather_cond : we take the most prevalent weather condition in each city
+
+highest_fequency_weather_city <- accident_2022_clean_09 %>%
+  group_by(state, county, city, weather_cond) %>%
+  summarize(n=n())%>%
+  slice(which.max(n))%>%
+  ungroup()
+
+colnames(highest_fequency_weather_city)[4] = 'most_common_weather_city'
+
+accident_2022_clean_09 <- left_join(accident_2022_clean_09 , highest_fequency_weather_city, by = c("state","county", "city"))
+
+for (x in 1:nrow(accident_2022_clean_09)){
+  if (is.na(accident_2022_clean_09$weather_cond[x])){
+    accident_2022_clean_09$weather_cond[x] <- accident_2022_clean_09$most_common_weather_city[x]
+  }
+}
+
+accident_2022_clean_09 <- accident_2022_clean_09 %>% 
+  select (-most_common_weather_city)%>%
+  select (-n) 
+
+#if we are still missing weather conditions, we take the ones of the state
+highest_fequency_weather_state <- accident_2022_clean_09 %>%
+  group_by(state, weather_cond) %>%
+  summarize(n=n())%>%
+  slice(which.max(n))%>%
+  ungroup()
+
+colnames(highest_fequency_weather_state)[2] = 'most_common_weather_state'
+
+accident_2022_clean_09 <- left_join(accident_2022_clean_09 , highest_fequency_weather_state, by = "state")
+
+for (x in 1:nrow(accident_2022_clean_09)){
+  if (is.na(accident_2022_clean_09$weather_cond[x])){
+    accident_2022_clean_09$weather_cond[x] <- accident_2022_clean_09$most_common_weather_state[x]
+  }
+}
+
+accident_2022_clean_09 <- accident_2022_clean_09 %>% 
+  select (-most_common_weather_state)%>%
+  select (-n) 
+
+print(accident_2022_clean_09[accident_2022_clean_09$state =="SD",])
+accident_2022_clean_09$weather_cond[27426] <- "Fair" #we replace the missing values by "fair" since the dates of accidents at this location all match and the weather was recorded as fair for one of them. 
+accident_2022_clean_09$weather_cond[27427] <- "Fair" 
+
+colSums(is.na(accident_2022_clean_09))#we handled all the missing values that could be detected. 
+
+############ 10. Create the variable "accidents_count_per_state ############
+
+#We count the number of accidents per each US state and create a new column.
+accident_2022_clean_09$state <- as.factor(accident_2022_clean_09$state)
+state_counts <- as.data.frame(table(accident_2022_clean_09$state))
+names(state_counts) <- c("state", "accidents_count_per_state")
+accident_2022_clean_09 <- merge(accident_2022_clean_09, state_counts, by = "state", all.x = TRUE)
+
+accident_2022_clean_10 <- apply(accident_2022_clean_09,2,as.character)
+
+#Finally, here we show how we saved the data in a csv file:  
+###############################################
+
+#write.csv (accident_2022_clean_10, "../data/accident_22_clean_final.csv", row.names = TRUE)
+#write.csv(accident_2022_clean_10, "D:/ML1_Project/data/accident_22_clean_final.csv", row.names = T)
+
+#d.accidents <- read.csv("../data/accident_22_clean_final.csv", row.names = NULL)
+#d.accidents <- read.csv("D:/ML1_Project/data/accident_22_clean_final.csv")
+
+###############################################
+```
+
+</details>
+
+```{r Load the data, echo=FALSE, message=FALSE}
+d.accidents <- read_csv("accident_22_clean_final.csv")
+```
+
+The resulting data set for this report covers all 49 US States and its attributes can be described as follows: 
+
+```{r Data_Summary, include = TRUE, echo=FALSE}
+# Create a simple data frame
+data = data.frame(
+  Variable = c("State", "County", "City", "City Population", "Street","Number of Accidents", "Severity", "Month", "Time Interval", "Duration","Daytime or Nightime", "Weather Condition", "Temperature", "Precipitation", "Amenity",
+               "Crossing", "Junction", "Station","Stop Sign","Traffic Signal"),
+  Description = c("US state where the accident took place", "The type of street where the accident occured", "The city where the accident occured", "Population range of the city in which the accident took place",
+                  "The type of street where the accident took place", "The number of car accidents per US state", "The severity of the accident with 1 being the lowest and 4 the highest", "month of the accident",
+                  "Time interval in which the accident took place: early morning, morning, afternoon or night", "Duration of the accident in minutes", "If it is light or dark outside","The weather condition", "Temperature in Celsius", 
+                  "Amount of water on the road after rainfall in mm","Presence of amenity (True or False)", "Presence of crossing (True or False)", "Presence of junction (True or False)", "Presence of station (True or False)","Presence of stop sign (True or False)", "Presence of traffic signal (True or False)"),
+  Type = c("Categorical", "Categorical", "Categorical", "Continuous", "Categorical", "Continuous", "Categorical", "Categorical", "Categorical", "Continuous", "Categorical", "Categorical", "Continuous", "Continuous","Categorical", "Categorical", "Categorical", "Categorical", "Categorical", "Categorical" )
+)
+
+data %>%
+  gt()%>%
+    tab_header(title = md("**Data Summary**"))
+```
+
+
+## Accident Duration
+
+Car accidents involve a considerable amount of logistics: the appropriate amount of personnel and equipment has to be sent at the site of the crash, route deviations are organized and information has to be broadcast to drivers. Understanding what causes longer delays in resolving accidents is therefore crucial to ensure proper planning. For example, equipment could be made more readily available near certain locations at certain times, personnel shifts could be better planned and traffic surcharge in nearby locations could be avoided. 
+
+We will first proceed with a visual data analysis to determine which explanatory variables could be included in our Linear Model and the sort of interaction they could have with the duration of an accident.
+
+## Linear Model
+#### Vitalia Vedenikova took the lead on the Linear Model sectionn
+
+### Exploratory visual analysis
+
+In our data set, we notice that 74,4% of accidents get resolved in hours, while only 24.9% get resolved in minutes and a small percentage of 0.6% of accidents take several days to manage. To bring down the percentage of accidents resolved in hours, we want to first identify possible predictors by building a Correlation Matrix: 
+
+```{r Pairwise Correlation, include = TRUE, echo=FALSE, cache=TRUE}
+d.test <- d.accidents[, c("duration", "severity", "time_interval", "cities_population", "stop", "station", "junction", "traffic_signal", "sunrise_sunset", "crossing", "amenity", "temp_c", "presip_mm")]
+d.test <- d.test %>%
+  mutate(across(c("time_interval", "crossing", "stop", "station", "junction", "traffic_signal", "sunrise_sunset"), as.factor))
+
+model.matrix(~0+., data=d.test) %>% 
+  cor(use="pairwise.complete.obs") %>% 
+  ggcorrplot(title = "Correlation Matrix", show.diag=FALSE, type="lower", lab=TRUE, lab_size=2)
+
+rm(d.test)
+```
+We would assume that an increase in population correlates to an increase in accident duration, but it does not appear to be the case as per the Correlation Matrix. The same can be said about the time intervals when accidents took place: they have no impact on duration. Lastly, temperatures did not seem to have an impact and neither did the precipitation level.
+
+On the other hand, we can see that there is a possible weak negative correlation between duration and the presence of traffic signals and crossings. There might also be a positive correlation with severity. No obvious strong multicollinearity concerns can be observed.
+
+
+### Duration and Severity
+
+By fitting a bar plot showing the average duration per severity of accidents, we find that accidents with a long duration tend to have a severity of 4 out of 4 on average. In fact, some accidents of that severity took more than a day to resolve.
+
+Examining the boxplots for each severity level with log transformed duration (due to the high quantity of outliers), the boxplot for severity 4 is higher than those of all other levels. This means that their duration tends to be higher. Their median is also higher, which is in line with what we evidenced with the barplot. 
+
+This is definitely a variable which we want to include in our Linear Model.
+
+```{r EDA Severity and Duration, include = TRUE, echo=FALSE, cache=TRUE, warning= FALSE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning = FALSE}
+
+#Barplot showing the mean of duration per severity
+duration.mean <- t(tapply(d.accidents$duration, list(d.accidents$severity), mean))
+coul <- brewer.pal(4, "Set2")
+barplot(duration.mean, border="#69b3a2", col=coul, xlab= "Severity", ylab="Duration (minutes)",main="Average Duration per Severity Level of Accident", ylim=c(0,2000))
+
+#Boxplots showing a significantly higher level of duration of severity 4 compared to severity 1 and 3:
+ggplot(data = d.accidents, mapping = aes(y = log(duration), x = severity)) + geom_point(aes(group = duration)) + geom_boxplot() + facet_grid(. ~ severity)
+```
+
+
+### Duration and the Locations of the Accidents
+
+#### US States
+
+While severity is an obvious factor, the place where the accidents take place could also have an impact. The US States with highest times elapsed are Los Angeles and to a much lesser extent Delaware and South Dakota, so this variable would also be interesting to include in our model.
+
+
+```{r Location and Duration, include=TRUE, echo=FALSE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning = FALSE}
+
+# US States Barplot
+mean_times <- aggregate(duration~ state, data = d.accidents, FUN = mean)
+mean_times <- mean_times[order(mean_times$duration),]
+highest_times_states <- mean_times[49:38,]
+
+ggplot(highest_times_states, aes(x = state, y = duration, fill = state, group = state)) + geom_bar(stat = "identity", color="black", position=position_dodge())+
+  scale_x_discrete(limits=highest_times_states$state) + geom_errorbar(aes(ymin=duration, ymax=duration+sd(duration)), width=.2,
+                 position=position_dodge(.9)) + labs(x="States", y=" Average Duration (min)") + ggtitle("US States with Highest Average Durations") + theme(plot.title = element_text(hjust=0.5))
+
+```
+
+
+#### Street types
+
+We notice that there appear to be some differences between the street types and notably that the median duration is highest for tunnels. This makes sense, since accidents in tunnels are more difficult to deal with due to increased danger. 
+
+While looking at barplots of counts of accidents for each street type, we also notice that there are more sever accidents happening on "Others", "Roads" and "Routes". Since we know that severity is correlated to duration, this is another contributing factor to our decision to keep streets as a possible predictor (perhaps to be used in an interaction term).
+
+```{r Trimming outliers and fitting a barplot and a boxplot, include = TRUE, echo=FALSE, cache=TRUE, warning= FALSE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning = FALSE}
+
+# Data set trimmed of excessive outliers (only for visualizations and NOT for model fitting)
+iqr <- IQR(d.accidents$duration)
+lower <- quantile(d.accidents$duration, 0.25) - 1.5 * iqr
+upper <- quantile(d.accidents$duration, 0.75) + 1.5 * iqr
+d.duration_trimmed <- d.accidents[d.accidents$duration >= lower & d.accidents$duration <= upper, ]
+
+# Street type Barplot and Boxplots
+## Boxplots for street types using trimmed data
+ggplot(data = d.duration_trimmed, mapping = aes(y = duration, x = street)) + geom_point() + geom_boxplot() +theme(axis.text.x = element_text(angle = 90)) + ggtitle("Duration against Street Types") + theme(plot.title = element_text(hjust=0.5))
+
+## Barplots of street type counts with severity groups
+ggplot(d.accidents) + 
+    geom_bar(aes(x = street, fill = factor(severity))) +theme(axis.text.x = element_text(angle = 90)) + ggtitle("Counts of Accidents per Street Type with Severity Factor") + theme(plot.title = element_text(hjust=0.5)) 
+```
+
+
+### When Accidents Took Place and Weather Conditions
+
+Looking at boxplots for each month, we notice that the boxplots for the months of June, July and August are lower than most of the boxplots from other months. January through March are also somewhat lower which translates to shorter durations. This might be due to fairer weather, and indeed the longest durations appear to coincide with bad weather conditions: snow and wind or rain and wind. We therefore would like to use the months and the weather conditions as predictors in our models.  
+
+```{r EDA Month and Weather, include = TRUE, echo=FALSE, cache=TRUE, warning= FALSE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning = FALSE}
+
+#Boxplots for each Month
+boxplot(duration ~ month, data = d.duration_trimmed,
+main = "Durations per Month",
+ylab = "Durations (min)")
+
+#Barplot with Weather Conditions with the longest durations on average
+mean_times <- aggregate(duration~ weather_cond, data = d.duration_trimmed, FUN = mean)
+mean_times <- mean_times[order(mean_times$duration),]
+highest_times <- mean_times[65:60,]
+
+ggplot(highest_times, aes(x = weather_cond, y = duration, fill = NULL)) + geom_bar(stat = "identity", color="black", position=position_dodge())+
+  scale_x_discrete(limits=highest_times$weather_cond) + labs(x="Weather Conditions", y="Average Duration (min)") + ggtitle("Weather Conditions with Highest Average Durations") + theme(plot.title = element_text(hjust=0.5))+theme(axis.text.x = element_text(angle = 90))
+
+rm(d.duration_trimmed)
+```
+To conclude our exploratory analysis, we retain the following possible predictors for a linear model to explain the duration: severity, months, US States, street types and weather conditions. 
+
+### Linear Model Fit
+
+We fit our model on the basis of the above predictors, making sure beforehand that they are all coded as categorical. However, once we examine the summary, we find that the weather_cond predictor does not seem to play an important role as its p-value is above 0.05. We therefore re-fit our model accordingly by removing it.
+
+```{r Linear_model_fitting, cache=TRUE}
+#We make sure that variables are correctly coded as categorical before fitting a model
+d.accidents <- d.accidents %>%
+  mutate(across(c("severity", "month", "state", "street", "weather_cond"), as.factor))
+
+#We fit our model
+lm.accidents.1 <-lm(duration~ severity + state + month + street + weather_cond, data=d.accidents)
+
+#p-value  of weather_cond
+summary_lm <- summary(lm.accidents.1)
+summary_lm$coefficients["stateCO", "Pr(>|t|)"]
+
+#We re-fit the model 
+lm.accidents.2 <- update(lm.accidents.1, .~. - weather_cond)
+```
+Earlier, we supposed that severity might interact with street types since certain streets appeared to have more severe accidents, so we add an appropriate interaction term which turns out to be significant due to its low p-value:
+```{r Adding_interaction_term, echo=TRUE}
+#Adding an interaction term:
+lm.accidents.3 <-update(lm.accidents.2, . ~ . + severity*street)
+
+#Single term deletions
+drop1(lm.accidents.3, test="F")
+```
+
+We now take a look at the residuals of our model. In the Residuals vs Leverage plot there is an extreme value above the Cook's Distance line of 1. This means that there is one very influential outlier in the data set. In the Q-Q Residuals plot, there are clear signs in the tails that the data is not normally distributed, especially in the higher values. Overall, We may say that the amount of outliers is considerable.
+
+```{r lm_residual_data, include=TRUE, echo=FALSE, warning= FALSE, cache=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default"}
+plot(lm.accidents.3, which = 2)
+plot(lm.accidents.3, which = 5)
+```
+
+For the above reasons, we log transform our explained variable and we re-examine the residuals. In the Q-Q Residuals plot, there are still indications that the data is not normally distributed since it does not fit on the line and is strongly skewed in the tails In the Residuals vs Fitted plot, many observations overlap and the smoother is not on zero indicating that the residuals are not normally distributed. Their variance appears to decrease with the fitted values so there is also probably heteroskedasticity. In the Residuals vs Leverage, we also still have an outlier above the Cook's Distance line of 1.
+
+```{r Linear Model 4, echo=TRUE}
+#Re-fit of the model with log transformed duration: 
+lm.accidents.4 <- lm(log(duration)~ state + severity + street + month + severity*street, data=d.accidents)
+```
+
+```{r qqplot, echo=FALSE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE}
+#Q-Q Plot and Residuals vs Leverage
+plot(lm.accidents.4, which = 2)
+plot(lm.accidents.4, which = 5)
+```
+For this linear model, we notice that the Multiple R-Squared and Adjusted R-squared are very low at 8.8% and 8.7% respectively. Therefore, we may say that the variance of the response variable is poorly explained by its relation to the explanatory variables. This being said, each variable was estimated significant while taking into account the effect of the other variables in the model. Indeed, the p-values of our model are all below 0.05 while using drop1().
+
+R-Squared and Ajusted R-Squared: 
+```{r lm4_rsquared, echo=FALSE, include=TRUE}
+#r-squared and adjusted r-squared 
+summary(lm.accidents.4)$r.squared
+summary(lm.accidents.4)$adj.r.squared
+```
+
+```{r drop1_for_lm4, include=TRUE, echo=TRUE}
+#Single term deletions
+drop1(lm.accidents.4, test="F")
+```
+Relevant coefficients from the lm.accidents.4 summary:
+```{r lm_coef_data, include=TRUE, echo=FALSE}
+#print relevant coefficients to comment
+summarylm4 <- summary(lm.accidents.4)
+coefficients <- summarylm4$coefficients
+coeffs_toprint <- coefficients[c("severity2", "severity3", "severity4", "stateSD", "stateMA", "month7"), ]
+coeffs_toprint 
+```
+In conclusion, US States, months and the interaction term between street types and severity all have a relevant effect on the duration of an accident.  
+
+Some important insights we may gather from this model are that, if we take severity 1 as a reference level, severity 2 and 4 are respectively 0.663455 and 1.163972 units higher, meaning that duration is 93% and almost 300% higher in these cases (all else being equal). US States also differ greatly from each other. Taking Alabama as the reference, duration of accidents can be up to 8 times higher in South Dakota while in Massachusetts it is 19% lower (all else being equal). In terms of the month when an accident took place, we can definitely say that duration is not affected by the weather : indeed the reference month for our model is January when weather conditions can be particularly bad, yet accidents in July take 6% longer to resolve.  
+
+## Generalised Additive Model
+#### Vitalia Vedenikova took the lead on the Generalised Additive Model section
+
+### Generalized Additive Model Fit
+For our GAM, we decide to add back the continuous variables we had examined in the exploratory visual analysis to see if we had missed a polynomial predictor. We do so using smoothers.
+
+We find that contrary to the linear model, the GAM model identifies the temperature and the cities' populations as significant predictors while there is no strong evidence that the precipitation amounts' effect is different from zero. The edf value of the temperature is 6.3, meaning that there is a non-linear effect. Similarity, the cities' populations edf is of 8.5, meaning that there is a non-linear effect there too. 
+
+Overall, the model is barely better than the linear model, with only 9% of the variance of the response variable explained by its relation to the explanatory variable.
+
+```{r GAM_model_data, include=TRUE, cache=TRUE}
+#GAM model fit
+gam.accidents <-gam(log(duration)~ severity + state + month + street + severity*street + s(temp_c) + s(presip_mm) + s(cities_population), data=d.accidents)
+
+#Approximative significance of smooth terms
+gam.summary <- summary(gam.accidents)
+gam.summary$s.table
+gam.summary$r.sq #r-squared value
+```
+As we already know from the linear model QQ-Plots, our data is very skewed and does not fulfill normality assumptions. This therefore explains why with a GAM we also have a very poorly fitting model.   
+Looking closer at the estimated smooth functions of the variables with strong evidence of significance, we cannot really see visual evidence of polynomials, so perhaps our model is also overfitted.
+
+```{r gam_residuals, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=FALSE}
+plot(gam.accidents, residuals = TRUE, select = 1)
+plot(gam.accidents, residuals = TRUE, select = 3)
+```
+
+Once we run gam.check(), we see that the k-index is very close to one, so there is no missed pattern left in the residuals. We cannot adjust the k to optimize our model further as this suggests there are no significant patterns in the residuals and there are enough basis functions for all smoother terms. The Response vs Fitted Values plot also clearly suggests that the model is a very bad fit since there is no 1 to 1 line present.   
+```{r gam_check, include=TRUE, echo=FALSE}
+#gam.check output
+set.seed(123)
+gam_check_output <- capture.output(gam.check(gam.accidents))
+cat(gam_check_output, sep = "\n")
+```
+In conclusion, there is poor evidence that the GAM model is a good fit for modelling the duration of car accidents. It does however suggest that there might be a non-linear effect from cities' populations and temperature which we might have overlooked by only using the linear model. 
+
+## Number of accidents per state
+As we previously noticed, US States were a statistically significant variable in predicting the duration of accidents. It is also easy to observe that the number of accidents varies a lot per State. In this section of our work, we strive to understand why this is the case to be able to address the causes and provide suggestions on how to reduce the amount of accidents in the future.
+
+## GLM Models
+
+#### Perez Olusese took the lead on the Poisson and Binomial models 
+
+## GLM - Poisson
+The Generalized Linear Model (GLM) with a Poisson distribution is a powerful tool for count data analysis, ideal for scenarios where the response variable represents non-negative integer counts.The count data in our dataset is the accident count per state. Data compatibility will be considered for this analysis to ensure the independent variables are suitable for this analysis. state, city, and county are not appropriate as independent variables in this Poisson model as they are categorical variables with very many levels.
+
+### Exploratory data analysis
+The independent variables that will look at exploring for this are severity, weather, month and time interval. We will therefore start the exploratory data analysis with these variables.
+
+### Severity
+The boxplot and barplot helps visualize the distribution of accident counts across different severity levels. This visualization can reveal whether higher severity levels are associated with higher or accident counts.
+
+```{r Severity vs Accident counts, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=FALSE}
+
+# Box plot showing the
+# Boxplot for Severity vs. Accidents Count
+ggplot(d.accidents, aes(x = factor(severity), y = accidents_count_per_state)) +
+  geom_boxplot() +
+  labs(title = "Severity vs. Accidents Count",
+       x = "Severity",
+       y = "Accidents Count")
+
+# Sum the accident counts for each severity level
+severity_summary <- d.accidents %>%
+  group_by(severity) %>%
+  summarise(total_accidents = sum(accidents_count_per_state, na.rm = TRUE))
+
+# Create the bar plot
+ggplot(severity_summary, aes(x = factor(severity), y = total_accidents)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Total Accidents Count by Severity",
+       x = "Severity",
+       y = "Total Accidents Count") +
+  theme_minimal()
+
+```
+
+### Weather Conditions
+Weather conditions can be considered as a factor that could affect the number of accidents count per state. To justify this assumption we will also do an Explanatory data analysis so as to see if of weather conditions on the accident counts per state.
+
+```{r Weather conditions vs. Accidents Count, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=FALSE}
+
+# Boxplot for Weather vs. Accidents Count
+# Convert weather_cond column to factor
+d.accidents$weather_cond <- as.factor(d.accidents$weather_cond)
+
+ggplot(d.accidents, aes(x = weather_cond, y = accidents_count_per_state)) +
+  geom_boxplot() +
+  labs(title = "Weather vs. Accidents Count",
+       x = "Weather_cond",
+       y = "Accidents Count")
+
+# Sum the accident counts for each weather condition
+weather_summary <- d.accidents %>%
+  group_by(weather_cond) %>%
+  summarise(total_accidents = sum(accidents_count_per_state, na.rm = TRUE))
+
+# Create the bar plot
+ggplot(weather_summary, aes(x = weather_cond, y = total_accidents)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Total Accidents Count by Weather Condition",
+       x = "Weather Condition",
+       y = "Total Accidents Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+There are some weather conditions that show some evidence that accidents counts increase during those conditions.we shall therefore use variable in our analysis.
+
+### Month
+We are going to consider months in our study so as to establish whether the month actually has an effect on the accident count per state. 
+
+From the Bar plot we can see the variation of accident counts in every month with the highest accidents appearing in month 4. 
+
+```{r Month_plots, include=TRUE, include=TRUE, echo=FALSE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning = FALSE}
+
+# Sum the accident counts for each month
+month_summary <- d.accidents %>%
+  group_by(month) %>%
+  summarise(total_accidents = sum(accidents_count_per_state, na.rm = TRUE))
+
+# Create the bar plot
+ggplot(month_summary, aes(x = factor(month), y = total_accidents)) +
+  geom_bar(stat = "identity", fill = "steelblue") +
+  labs(title = "Total Accidents Count by Month",
+       x = "Month",
+       y = "Total Accidents Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+### Time interval
+
+The time at which an accident occurs is a crucial factor in our analysis. We aim to investigate whether the timing of accidents significantly impacts the total number of accidents. By examining patterns related to the time of day, we seek to identify peak periods for accidents and understand how temporal factors contribute to accident frequency. This analysis will help us determine if specific times are associated with higher accident counts, providing valuable insights for improving traffic management and road safety interventions.
+
+It is evident that the time when an accident occurs affects the accident count per state. we will therefore use this variable in our analysis.
+
+```{r Boxplot on Time_interval_plot, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=FALSE}
+
+# Boxplot for Time Interval vs. Accidents Count
+ggplot(d.accidents, aes(x = time_interval, y = accidents_count_per_state)) +
+  geom_boxplot() +
+  labs(title = "Time Interval vs. Accidents Count",
+       x = "Time Interval",
+       y = "Accidents Count")
+
+# Create the bar plot
+ggplot(d.accidents, aes(x = time_interval)) +
+  geom_bar(fill = "steelblue") +
+  labs(title = "Accidents Count by Time Interval",
+       x = "Time Interval",
+       y = "Accidents Count") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+```
+
+
+In conclusion we will use the following predictors for our poisson model.
+-severity
+-Weather conditions
+-month 
+-time interval
+
+### Poisson model fitting
+```{r poisson_model, include= TRUE}
+
+glm_accident_1 <- glm(accidents_count_per_state ~ severity + weather_cond + month + time_interval,
+                 data = d.accidents,
+                 family = poisson)
+``` 
+
+```{r poisson_model_2, include= TRUE, echo=FALSE}
+# model_output is the summary of the model
+model_output <- summary(glm_accident_1)
+
+# Capture the entire output as a character vector
+output_lines <- capture.output(model_output)
+
+# Extract the first 15 lines and the last 15 lines
+first_fifteen <- head(output_lines, 15)
+last_fifteen <- tail(output_lines, 15)
+
+# Combine the first fifteen and last fifteen lines with a separator in between
+combined_output <- c(first_fifteen, "...", last_fifteen)
+
+# Save the combined output to a variable
+formatted_output <- paste(combined_output, collapse = "\n")
+
+# Print the combined output inside a Markdown code block
+cat("```\n", formatted_output, "\n```", sep = "")
+
+
+``` 
+
+Upon examining the Poisson model, we observe that the residual deviance is 602,625,613 while the degrees of freedom are 95,537, indicating that our model is over-dispersed. In a well-fitting Poisson model, these two values would be approximately equal. To address this over-dispersion, we will construct a quasi-Poisson model to accurately account for the dispersion parameters and improve the model’s fit.
+
+```{r quasi_poisson_model, include=TRUE, }
+
+quasi_accident_1 <- glm(accidents_count_per_state ~ severity + weather_cond + month + time_interval,
+                 data = d.accidents,
+                 family = quasipoisson)
+```
+
+```{r quasi_poisson_model_2, include=TRUE, echo=FALSE}
+# model_output is the summary of the model
+model_output <- summary(quasi_accident_1)
+
+# Capture the entire output as a character vector
+output_lines <- capture.output(model_output)
+
+# Extract the first 15 lines and the last 15 lines
+first_fifteen <- head(output_lines, 15)
+last_fifteen <- tail(output_lines, 15)
+
+# Combine the first fifteen and last fifteen lines with a separator in between
+combined_output <- c(first_fifteen, "...", last_fifteen)
+
+# Save the combined output to a variable
+formatted_output <- paste(combined_output, collapse = "\n")
+
+# Print the combined output inside a Markdown code block
+cat("```\n", formatted_output, "\n```", sep = "")
+
+
+```
+
+From the quasi-Poisson model, we observe that the dispersion parameter is 6,244.576 compared to the fixed value of 1 in the Poisson model. This indicates that the variance increases faster than linearly. 
+
+### Interpreting some results
+
+```{r interpreting_weather_conditions, include=TRUE}
+
+## interpreting weather conditions
+exp(coef(glm_accident_1)["weather_condDrizzle and Fog"])
+
+```
+when the weather condition changes to drizzle and fog we expect the accident count per state to go higher by 24.5%.
+```{r interpreting_results, include=FALSE}
+
+## interpreting weather conditions
+exp(coef(glm_accident_1)["severity2"])
+
+```
+
+### Poisson conclusion
+When we do a comparison of the estimated model coefficients from the quasi-poisson model we notice that they remain identical to those in the Poisson model, but the standard errors and p-values are adjusted in the quasi-Poisson model.
+In conclusion.The analysis reveals minimal evidence that factors such as time interval significantly affect the accident count per state. However, certain weather conditions, certain severity levels, and certain months do have a notable impact on the accident count per state.
+
+
+## Severity of Accidents
+As much as the amount of accidents, the severity of the accidents are an important aspect to consider. Preventing serious accidents could prevent loss of life, serious injury as well as excessive material damage. It is therefore crucial to understand their causes.
+
+## GLM -Binomial
+The binomial model utilizes binary data for its analysis. To adapt our dataset for this model, we will convert the severity variable into a binary format. The original severity variable has four levels, ranging from one to four. We will combine levels 1 and 2 into a single category, labeled as 0, representing low severity. Similarly, we will merge levels 3 and 4 into another category, labeled as 1, representing high severity. This transformation will allow us to effectively apply the binomial model to our analysis.
+
+```{r converting severity to binary, include=TRUE}
+
+# Convert severity to binary
+d.accidents_binary <- d.accidents %>%
+  mutate(severity_binary = ifelse(severity %in% c(1, 2), 0, 1))
+```
+
+In this analysis, we are utilizing the boolean variables present in our dataset to gain deeper insights. These boolean variables, which represent binary states such as true/false or yes/no, will help us effectively categorize and analyze different aspects of the data. By leveraging these variables, we can streamline our analysis, enhance the accuracy of our models, and better understand the underlying patterns and trends in our dataset.
+
+```{r Pairwise_Correlation_severity, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=FALSE}
+d.test <- d.accidents[, c("severity", "stop", "junction", "traffic_signal")]
+d.test <- d.test %>%
+  mutate(across(c("stop", "junction", "traffic_signal"), as.factor))
+
+model.matrix(~0+., data=d.test) %>% 
+  cor(use="pairwise.complete.obs") %>% 
+  ggcorrplot(title = "Correlation Matrix", show.diag=FALSE, type="lower", lab=TRUE, lab_size=2)
+
+rm(d.test)
+```
+
+We are going to use the junction, stop and traffic_signal to build the glm binomial model since there seems to be some correlation between the severity and these variables. No obvious multicollinearity concerns can be observed.
+
+```{r glm_binomial_model, echo=FALSE}
+
+# Build the GLM binomial model
+glm_binomial_1 <- glm(severity_binary ~  junction + stop + traffic_signal,
+                 family = binomial, data = d.accidents_binary)
+summary(glm_binomial_1)
+
+```
+
+Due to the use of a link function, we must transform the coefficients to accurately interpret them. Our analysis reveals little evidence that stops and traffic signals significantly affect the severity of accidents. However, there is some evidence suggesting that junctions have an impact on accident severity. By interpreting the transformed coefficients, we can better understand how the presence of junctions influences the severity of road accidents, potentially indicating that certain junction designs or traffic conditions at junctions may contribute to more severe accidents.
+
+```{r intrepreting_junction, include=TRUE}
+
+exp(coef(glm_binomial_1)["junctionTRUE"])
+```
+
+We can see that severity of road accidents increase by about 11.6% at junctions.
+
+```{r Model_plot, include=TRUE, include=TRUE, echo=FALSE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning = FALSE}
+
+# Extract the residuals from the model
+residuals <- residuals(glm_binomial_1, type = "deviance")
+
+# Create the QQ plot for residuals
+qq_plot <- ggplot(data.frame(residuals = residuals), aes(sample = residuals)) +
+  stat_qq() +
+  stat_qq_line() +
+  labs(title = "QQ Plot of Deviance Residuals",
+       x = "Theoretical Quantiles",
+       y = "Sample Quantiles") +
+  theme_minimal()
+
+# Display the QQ plot
+print(qq_plot)
+```
+
+
+From this analysis we can see that the severity of accidents increases at junctions.This plot shows that this model does not fit our data.
+ 
+## Support Vector Machine
+#### Vitalia Vedenikova and Perez Olusese worked on this model 
+
+Now that we examined severity with a binomial model, we would like to increase the amount of predictors we use and check how accurately we can predict the severity of an accident. Support Vector Machines are particularly well adapted to the task as they are robust models capable of classifying accidents into various categories. In order to perfect our work, we will also supplement this method with cross validation techniques.
+
+```{r Pairwise_Correlation_severity_more_variables, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=FALSE}
+d.test <- d.accidents[, c("severity", "time_interval")]
+
+d.test <- d.test %>%
+  mutate(across(c("time_interval"), as.factor))
+
+model.matrix(~0+., data=d.test) %>% 
+  cor(use="pairwise.complete.obs") %>% 
+  ggcorrplot(title = "Correlation Matrix", show.diag=FALSE, type="lower", lab=TRUE, lab_size=2)
+
+
+d.test <- d.accidents[, c("severity", "amenity", "crossing", "station", "cities_population", "month")]
+d.test <- d.test %>%
+  mutate(across(c("amenity", "crossing", "station"), as.factor))
+
+model.matrix(~0+., data=d.test) %>% 
+  cor(use="pairwise.complete.obs") %>% 
+  ggcorrplot(title = "Correlation Matrix", show.diag=FALSE, type="lower", lab=TRUE, lab_size=2)
+
+rm(d.test)
+```
+As a first step, we look at the types of predictors we could use with the help of two correlation matrices. What observe some level of collinearity with traffic sign variables, time intervals, months and cities populations. No obvious multicollinearity concerns can be observed. Street types are also chosen as a predictor since serious accidents often occur on high speed roads.  
+
+```{r support_vector_machine_dataset_preparation, include=FALSE, echo=FALSE}
+# Ensure d.accidents_vector is a data.table
+d.accidents_vector <- d.accidents
+setDT(d.accidents_vector)
+
+d.accidents_vector <- d.accidents_vector %>%
+  mutate(severity = ifelse(severity %in% c(3, 4), 1, 0))
+
+# Select variables 
+bool_cols <- c("amenity", "crossing", "junction", "station", "stop", "traffic_signal", "cities_population", "month", "street", "time_interval")
+d.accidents_vector<- d.accidents_vector[, c(bool_cols, "severity"), with = FALSE]
+
+table(d.accidents_vector$severity)
+```
+
+Our next step is to balance our data set. Indeed, there 13 times more accidents of a low severity than of a high one.
+
+```{r Initial_state_severities, include=TRUE, echo=FALSE}
+#Initial proportions of severity 0 vs severity 1 (minor vs major accidents)
+table(d.accidents_vector$severity)
+```
+
+We therefore balance these two groups' counts via stratified sampling to obtain equal proportions of minor and major accidents. If the count sizes are not equal, then the model's true positive and true negative rates can be significantly reduced and lead to faulty classifications. The resulting sampled data is as follows:   
+```{r Sampling_SVM_dataset, include=TRUE, echo=FALSE}
+set.seed(123)
+
+# Balancing the data set 
+
+# Define the sampling fraction for major severity
+sampling_fraction <- 0.07506
+
+# Sample data with different fractions for severity 2 and other severity levels
+d.accidents_vector <- d.accidents_vector %>%
+  group_by(severity) %>%
+  do({
+    if (.$severity[1] == 0) {
+      sample_frac(., size = sampling_fraction)
+    } else {
+      .
+    }
+  }) %>%
+  ungroup()
+
+# Check the resulting sampled data
+table(d.accidents_vector$severity)
+
+setDT(d.accidents_vector)
+```
+### Initial SVM model fitting
+```{r SVM_model, echo=TRUE}
+# Convert boolean columns to factors
+d.accidents_vector[, (bool_cols) := lapply(.SD, as.factor), .SDcols = bool_cols]
+
+# Define the target variable and features
+y <- d.accidents_vector$severity
+X <- d.accidents_vector[, !("severity"), with = FALSE]
+
+# Split the data into training and testing sets
+set.seed(123) # For reproducibility
+trainIndex <- createDataPartition(y, p = 0.8, list = FALSE, times = 1)
+X_train <- X[trainIndex,]
+X_test <- X[-trainIndex,]
+y_train <- y[trainIndex]
+y_test <- y[-trainIndex]
+
+# Set seed for reproducibility
+set.seed(123)
+
+# Train the SVM model with the RBF kernel-linear and cost set to 10
+svm_model <- svm(
+  as.factor(y_train) ~ ., 
+  data = X_train, 
+  kernel = "linear", 
+  cost = 10, 
+)
+
+```
+
+### Predicting the test set and evaluating the model:
+```{r Predictions_Evaluations_SVM, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=TRUE}
+##### Make predictions on the test set #####
+predictions <- predict(svm_model, X_test)
+
+##### Evaluate the model #####
+conf_matrix <- confusionMatrix(predictions, as.factor(y_test))
+print(conf_matrix)
+
+##### Defining the Confusion matrix #####
+# Convert confusion matrix to a data frame for ggplot2
+conf_df <- as.data.frame(conf_matrix$table)
+colnames(conf_df) <- c("Prediction", "Reference", "Freq")
+```
+```{r Matrix_SVM, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=FALSE}
+# Plot the confusion matrix
+ggplot(conf_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 5) +
+  scale_fill_gradient(low = "lightblue", high = "blue") +
+  theme_minimal() +
+  ggtitle("Confusion Matrix") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+
+At this stage, the accuracy of our model is of 68%. It has a sensitivity that is at 64%. It means that it is quite accurate in dividing serious and minor accidents. The specificity, which refers to the true negative rate, is somewhat high at 73%. The Pos Pred Value, which refers to the precision is acceptable at 70%, meaning that there is a high proportion of predicted positive cases that are correctly identified. There is a lower proportion of negative cases that are correctly identified at 67%. Overall, we may say that our model is rather consistent with most indicators being between 64% and 73% but not very accurate in its predictions. 
+
+We try to fit a model with RBF kernel-radial to see if we could get better results. However, as the accuracy turns out to be slightly lower and the sensitivity 10% inferior, we discard this model. 
+```{r Trial_with_other_parameters, echo=TRUE}
+# Train the SVM model with the RBF kernel-radial and cost set to 100
+svm_model <- svm(
+  as.factor(y_train) ~ ., 
+  data = X_train, 
+  kernel = "radial", 
+  cost = 100, 
+)
+```
+
+```{r Trial_with_other_parameters_predictions_evaluations, include=TRUE, echo=FALSE}
+# Make predictions on the test set
+predictions <- predict(svm_model, X_test)
+
+# Evaluate the model
+conf_matrix <- confusionMatrix(predictions, as.factor(y_test))
+conf_matrix$overall["Accuracy"]
+conf_matrix$byClass["Sensitivity"]
+
+```
+In this next step, we use different cost parameters to define seven models, then we use cross validation to compare them and return the max accuracy we could find across the models. The best one is 68.2% accurate, so we concede that we cannot find a better SVM model for our accident severity prediction. 
+
+```{r cross_validation_SVM, echo=TRUE}
+# Set seed for reproducibility
+set.seed(123)
+
+# Number of folds
+k <- 5
+
+# Create folds
+folds <- createFolds(y, k = k, list = TRUE)
+
+# Initialize a vector to store accuracy for each fold
+accuracy <- numeric(k)
+
+# Perform cross-validation
+  for (i in 1:k) {
+  # Split the data into training and testing sets
+  train_indices <- folds[[i]]
+  X_train <- X[-train_indices,]
+  y_train <- y[-train_indices]
+  X_test <- X[train_indices,]
+  y_test <- y[train_indices]
+  
+  # Train the SVM model with linear kernel
+  svm_model <- svm(as.factor(y_train) ~ ., data = X_train, kernel = "linear", 
+                   ranges = list(cost = c(0.001, 0.01, 0.1, 1, 5, 10, 100)))
+  
+  summary(svm_model)
+
+  # Make predictions on the test set
+  predictions <- predict(svm_model, X_test)
+  table(predictions)
+  
+  # Calculate accuracy
+  accuracy[i] <- mean(predictions == y_test)
+}
+
+# Print the average accuracy
+max_accuracy <- max(accuracy)
+print(max_accuracy)  
+```
+
+In conclusion, while our binomial model allowed us to understand the types of relations between the severity and some predictors, with out SVM model we tested out their predictive power with measures of accuracy, sensitivity and so on. Although our prediction model was not the best at around 68% adjusted accuracy, it still tells us that variables related to various traffic signs, the cities' populations, street types and time intervals all have a somewhat strong impact on the severity of an accident. 
+
+## Artificial Neural Network
+#### Vitalia Vedenikova and Perez Olusese worked on this model
+
+Another method well adapted in theory to the prediction or classification of severity of accidents are Neural Networks. This method does however involve significantly more computing power than a Support Vector Machine model, which means that its application is more time consuming and prone to errors. Because of this, we had to remove cities populations from our predictors. Same as for the SVM, we used a balanced data set where the count of major and minor accidents is equal. 
+
+```{r ANN_severity_setup_sampling, include=FALSE, echo=FALSE}
+# Define d.accidents_neural
+d.accidents_neural <- d.accidents[, c("severity", "crossing","traffic_signal", "temp_c", "month", "time_interval", "street", "junction")]
+
+d.accidents_neural <- d.accidents_neural %>%
+  mutate(severity = ifelse(severity %in% c(3, 4), 1, 0))
+
+d.accidents_neural$severity <- factor(d.accidents_neural$severity)
+
+set.seed(123)
+
+#We use stratified sampling by severity
+#d.accidents_neural <- d.accidents_neural %>%
+#  group_by(severity) %>%
+#  sample_frac(size = 0.8) %>%
+#  ungroup()
+
+table(d.accidents_neural$severity)
+
+# Balancing the data set
+# Define the sampling fraction for severity 2
+sampling_fraction_2 <- 0.07506
+
+# Sample data with different fractions for severity 2 and other severity levels
+d.accidents_neural <- d.accidents_neural %>%
+  group_by(severity) %>%
+  do({
+    if (.$severity[1] == 0) {
+      sample_frac(., size = sampling_fraction_2)
+    } else {
+      .
+    }
+  }) %>%
+  ungroup()
+
+d.accidents_neural <- d.accidents_neural %>%
+  mutate(across(c("severity", "time_interval","month", "street", "junction", "crossing", "traffic_signal"), as.factor))
+
+```
+
+As further steps, we encoded dummy variables, normalized the numerical variables and lastly partitioned our data for training. We also made sure that the formula for our model was correctly defined in order to avoid using wrong predictors.
+
+```{r encode_dummies_partitiontraintestdata_formula, include=FALSE}
+#we encode dummy variables
+model_matrix <- model.matrix(~ . - 1, data = d.accidents_neural)
+d.accidents_neural <- data.frame(severity = d.accidents_neural$severity, model_matrix)
+
+#normalize the numerical variables
+normalize <- function(x) {return ((x - min(x)) / (max(x) - min(x)))}
+vars_num <- c("temp_c")
+d.accidents_neural[vars_num] <- as.data.frame(lapply(d.accidents_neural[vars_num], normalize))
+
+#partition the data for training
+indices <- createDataPartition(d.accidents_neural$severity, p=.85, list = F)
+
+severity_mod <- d.accidents_neural %>% select(-severity)
+train_mod <- severity_mod %>% slice(indices)
+
+train <- d.accidents_neural %>%
+  slice(indices)
+
+test_in <- d.accidents_neural %>%
+  slice(-indices) %>%
+  select(-severity)
+
+test_truth <- d.accidents_neural %>%
+  slice(-indices) %>%
+  pull(severity)
+
+# Create the formula for the neural network (we make sure to remove severities as a predictors)
+vars_exclude <- c("severity0", "severity1") 
+predictors <- setdiff(names(train_mod), c("severity", vars_exclude)) 
+formula <- as.formula(paste("severity0 + severity1 ~", paste(predictors, collapse = " + ")))
+```
+
+Then, we look at the different models: 
+
+```{r Models_Optimization_Neural_Network, warning=FALSE}
+#We will implement parallel processing to make the process more efficient:
+library(doParallel)
+cl <- makePSOCKcluster(detectCores() - 1)
+registerDoParallel(cl)
+
+#Then we optimize the network structure
+set.seed(142)
+
+models <- train(formula, train_mod,
+               method="neuralnet",   
+               tuneGrid = expand.grid(.layer1=c(2:4), .layer2=c(0:2), .layer3=c(0)),               
+               learningrate = 0.001,  
+               threshold = 0.05,     
+               stepmax = 70000
+)
+
+#stop the cluster
+stopCluster(cl)
+registerDoSEQ()
+
+plot(models)
+```
+
+The best model for this data appears to be one with 2 hidden units in layer 1 and 0 hidden units in layer 2. This is the one which we test out now: 
+
+```{r Best_Model_Neural_Network, cache=TRUE, include=TRUE}
+#We will implement parallel processing to make the process more efficient:
+cl <- makePSOCKcluster(detectCores() - 1)
+registerDoParallel(cl)
+
+#We implement the best model:
+set.seed(42)
+best_model <- neuralnet(
+    formula,
+    train,
+    hidden = c(2),
+    learningrate = 0.001, 
+    threshold = 0.05,   
+    stepmax = 100000 
+  )
+
+#stop the cluster
+stopCluster(cl)
+registerDoSEQ()
+
+#We look at the confusion matrix and evaluate our model: 
+test_results <- neuralnet::compute(best_model, test_in)
+test_pred <- apply(test_results$net.result, 1, which.max)
+test_pred <- factor(levels(test_truth)[test_pred], levels = levels(test_truth))
+confusionMatrix(test_truth, test_pred)
+```
+```{r Best_Confusion_Matrix, include=TRUE, fig.width=6, fig.asp=0.618, out.width="50%", fig.align="default", warning=FALSE, echo=FALSE}
+conf_matrix <- confusionMatrix(test_truth, test_pred)
+conf_df <- as.data.frame(conf_matrix$table)
+colnames(conf_df) <- c("Prediction", "Reference", "Freq")
+
+# Plot the confusion matrix
+ggplot(conf_df, aes(x = Reference, y = Prediction, fill = Freq)) +
+  geom_tile() +
+  geom_text(aes(label = Freq), color = "white", size = 5) +
+  scale_fill_gradient(low = "lightblue", high = "blue") +
+  theme_minimal() +
+  ggtitle("Confusion Matrix") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+```
+
+Note that while this is not shown here, we did run tests with many different settings for hidden layers, the learning rate and the stepmax. We are only showing the optimal model in terms of accuracy and other metrics. 
+
+The accuracy of our Neural Network Model is of 65%, which is slighlty lower than that of the Support Vector Machine. Its specificity, which refers to the true negative rate, is much lower at 63%. Furthermore, its precision is much lower at 59%, so it does not identify positive cases very well. It does however identify negative cases better with a rate of 71% compared to the rate of 67% from the SVM. It is also more dispersed, since its confidence interval is larger than that of the SVM model.
+Surprisingly, it seems to be much worse than the SVM at predicting serious accidents, since a lot of them were misclassified as low severity. This is concerning and would lead us to prefer the SVM model, which does misclassify minor accidents as serious more often, but would prove less risky to use as a prediction model in a real life scenario. Indeed, it would be better to identify accidents as serious than minor in  most cases. 
+
+
+## Conclusion
+After investigating our three main topics of the duration, amount and severity of car accidents in the USA, we draw the following overall conclusions: 
+
+We found that US States, months and the interaction term between severity and street type all had a strong association with the duration of an accident. Our GAM model also revealed a possible influence from temperature levels and cities’ populations. In particular, a sharp increase in duration coincided with higher severity levels, suggesting a positive correlation. Interestingly, the weather conditions did not appear to have much importance, since it took less time to deal with accidents in January than in warmer months. Perhaps emergency services’ response times are already optimized for all weather conditions. Nevertheless, Los Angeles stood out in  how long its durations are, so a separate, in-depth study of this State’s road infrastructure is advised. 
+
+From our models we also found that weather conditions show evidence that they do affect accident occurrence. This is evidenced by the fact that the number of accidents per state are affected by certain weather conditions. 
+
+When it comes to measuring severity, it is evident from our models that junctions increase the chances of severe road accidents, perhaps because bad drivers might not slow down at those places. Perhaps accident-prone junctions need to be identified and replaced with roundabouts.
+
+Ultimately, the predictors we identified allowed us to fit Support Vector Machine and Neural Network prediction models that were capable of predicting severity of accidents up to a 68% level of accuracy. To increase their prediction power, more highly correlated variables could be identified and previous years considered in our data set.  
+
+
+## Use of Generative AI
+We utilized ChatGPT-3.5 to enhance the structure and grammar of our report, ensuring clarity and professionalism. It assisted us in understanding and resolving errors encountered during the coding process. Additionally, ChatGPT-3.5 provided valuable guidance and structure when certain aspects were unclear, helping us to articulate our ideas more effectively and maintain a cohesive flow throughout the report. Since we did not have much experience with functions in R, we also used it to help us define certain variables in the data preparation process and to experiment with sampling methods for the four levels of severity in the context of the SVM and ANN models. 
+
+
+## Reflection
+This project presented a steep learning curve for us as a team of two people, but it offered invaluable insights into the real-world tasks and responsibilities of data scientists. During the process, we encountered numerous challenges that tested our problem-solving skills and deepened our statistical knowledge. We gained hands-on experience with data collection, cleaning, and preprocessing, which made us realize the importance of data preparation. Analyzing complex datasets and applying advanced statistical methods allowed us to see the practical applications of theoretical concepts we learned. Moreover, we realized how difficult it could be to build machine learning models and draw meaningful conclusions from our findings. Overall, this project truly enhanced our technical skills and adaptability as data scientists.
+  
+  
+  
+  
+  
