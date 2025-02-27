@@ -36,3 +36,11 @@ It involved the following steps:
 - We augmented our data frame with cities’ populations to take it into account during analysis
 - We handled missing data by replacing them by specifically defined means
 - We added the count of accidents per US state to be used in some models.
+
+## Structure of the repository 
+.
+├── Data
+├── RCode
+├── RMarkdown
+├── Report
+└── README.md
