@@ -38,9 +38,4 @@ It involved the following steps:
 - We added the count of accidents per US state to be used in some models.
 
 ## Structure of the repository 
-.
-├── Data
-├── RCode
-├── RMarkdown
-├── Report
-└── README.md
+tree -L 1
