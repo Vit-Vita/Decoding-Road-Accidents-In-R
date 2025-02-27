@@ -37,5 +37,3 @@ It involved the following steps:
 - We handled missing data by replacing them by specifically defined means
 - We added the count of accidents per US state to be used in some models.
 
-## Structure of the repository 
-tree -L 1
